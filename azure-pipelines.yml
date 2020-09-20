@@ -1,34 +1,112 @@
-# ASP.NET Core (.NET Framework)
-# Build and test ASP.NET Core projects targeting the full .NET Framework.
-# Add steps that publish symbols, save build artifacts, and more:
+# ASP.NET Core
+# Build and test ASP.NET Core projects targeting .NET Core.
+# Add steps that run tests, create a NuGet package, deploy, and more:
 # https://docs.microsoft.com/azure/devops/pipelines/languages/dotnet-core
 
 trigger:
 - master
 
 pool:
-  vmImage: 'windows-latest'
+  vmImage: 'ubuntu-latest'
 
 variables:
-  solution: '**/*.sln'
-  buildPlatform: 'Any CPU'
   buildConfiguration: 'Release'
 
 steps:
-- task: NuGetToolInstaller@1
+    
+- script: dotnet build --configuration $(buildConfiguration)
+  displayName: 'dotnet build $(buildConfiguration)'
 
-- task: NuGetCommand@2
+- task: DotNetCoreCLI@2
   inputs:
-    restoreSolution: '$(solution)'
+    command: 'publish'
+    publishWebProjects: true
+    arguments: '--configuration $(BuildConfiguration) --output $(Build.ArtifactStagingDirectory)'
+    zipAfterPublish: True
 
-- task: VSBuild@1
+- task: AzureRmWebAppDeployment@4
   inputs:
-    solution: '$(solution)'
-    msbuildArgs: '/p:DeployOnBuild=true /p:WebPublishMethod=Package /p:PackageAsSingleFile=true /p:SkipInvalidConfigurations=true /p:DesktopBuildPackageLocation="$(build.artifactStagingDirectory)\WebApp.zip" /p:DeployIisAppPath="Default Web Site"'
-    platform: '$(buildPlatform)'
-    configuration: '$(buildConfiguration)'
+    ConnectionType: 'AzureRM'
+    azureSubscription: 'Azure Web App Deployment Connection'
+    appType: 'webApp'
+    WebAppName: 'buildtestapp'
+    packageForLinux: '$(Build.ArtifactStagingDirectory)/**/*.zip'
 
-- task: VSTest@2
+- task: owaspzap@1
+  displayName: 'OWASP ZAP'
   inputs:
-    platform: '$(buildPlatform)'
-    configuration: '$(buildConfiguration)'
+    threshold: '75'
+    scantype: 'targetedScan'
+    url: 'https://buildtestapp.azurewebsites.net/'
+
+- task: PublishBuildArtifacts@1
+  inputs:
+    PathtoPublish: '$(Build.SourcesDirectory)/owaspzap'
+    ArtifactName: 'Zap Reports'
+
+
+- bash: |
+   sudo npm install -g handlebars-cmd
+
+   cat <<EOF > owaspzap/nunit-template.hbs
+   {{#each site}}
+
+   <test-run
+       id="2"
+       name="Owasp test"
+       start-time="{{../[@generated]}}"  >
+       <test-suite
+           id="{{@index}}"
+           type="Assembly"
+           name="{{[@name]}}"
+           result="Failed"
+           failed="{{alerts.length}}">
+           <attachments>
+               <attachment>
+                   <filePath>$(Build.SourcesDirectory)/owaspzap/report.html</filePath>
+               </attachment>
+           </attachments>
+       {{#each alerts}}<test-case
+           id="{{@index}}"
+           name="{{alert}}"
+           result="Failed"
+           fullname="{{alert}}"
+           time="1">
+               <failure>
+                   <message>
+                       <![CDATA[{{{desc}}}]]>
+                   </message>
+                   <stack-trace>
+                       <![CDATA[
+   Solution:
+   {{{solution}}}
+
+   Reference:
+   {{{reference}}}
+
+   instances:{{#each instances}}
+   * {{uri}}
+       - {{method}}
+       {{#if evidence}}- {{{evidence}}}{{/if}}
+                       {{/each}}]]>
+                   </stack-trace>
+               </failure>
+       </test-case>
+       {{/each}}
+       </test-suite>
+   </test-run>
+   {{/each}}
+   EOF
+  displayName: 'owasp nunit template'
+  condition: always()
+
+- bash: ' handlebars owaspzap/report.json < owaspzap/nunit-template.hbs > owaspzap/test-results.xml'
+  displayName: 'generate nunit type file'
+  condition: always()
+
+- task: PublishTestResults@2
+  displayName: 'Publish Test Results **/TEST-*.xml'
+  inputs:
+    testResultsFormat: NUnit
+    testResultsFiles: 'owaspzap/test-results.xml'
+  condition: always()
